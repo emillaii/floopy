@@ -1,0 +1,29 @@
+{
+  "name": "vikingdb-js-tools",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon ai_champion_middleware.js",
+    "create:collection": "node create_collection.js",
+    "ingest:vivaone": "node ingest_vivaone.js --file ../vivaone_metadata/metadata.json",
+    "test:retrieval": "node retrieval_test.js -q 'action adventure' --limit 5",
+    "chat:champion": "node ai_champion_chatbot.js",
+    "chat:server": "node ai_champion_middleware.js"
+  },
+  "dependencies": {
+    "@pinecone-database/pinecone": "^2.2.1",
+    "@volcengine/openapi": "^1.32.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "csv-parse": "^5.5.5",
+    "express": "^4.19.2",
+    "mammoth": "^1.6.0",
+    "mongoose": "^8.5.1",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.3"
+  }
+}

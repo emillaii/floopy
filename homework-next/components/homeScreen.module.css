@@ -1,0 +1,17 @@
+.backdrop {
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  background: linear-gradient(135deg, #eef3ff 0%, #f8fbff 40%, #ffffff 100%);
+}
+
+.panel {
+  flex: 1;
+}
+
+@media (max-width: 720px) {
+  .panel {
+  }
+}
