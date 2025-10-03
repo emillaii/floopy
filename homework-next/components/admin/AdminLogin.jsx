@@ -32,7 +32,7 @@ export default function AdminLogin({ onSubmit, loading = false, error = '' }) {
   return (
     <div className={styles.container}>
       <div className={styles.card}>
-        <span className={styles.brand}>Homework Admin</span>
+        <span className={styles.brand}>Homework Funhouse</span>
         <h1 className={styles.title}>Welcome back, admin</h1>
         <p className={styles.subtitle}>
           Sign in with your administrator credentials to create new floppy experiences and test them instantly.
@@ -78,4 +78,3 @@ export default function AdminLogin({ onSubmit, loading = false, error = '' }) {
     </div>
   );
 }
-

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
+import { LogoutOutlined, MenuOutlined, CloseOutlined } from '@ant-design/icons';
 import styles from './admin.module.css';
 
 export const NAV_ITEMS = [
@@ -12,13 +12,8 @@ export const NAV_ITEMS = [
   },
   {
     key: 'sandbox',
-    label: 'Sandbox builder',
-    hint: 'Load a floppy into a RAG-powered agent',
-  },
-  {
-    key: 'sandbox-manager',
-    label: 'Sandbox manager',
-    hint: 'Organise saved sandboxes and character cards',
+    label: 'Sandbox lab',
+    hint: 'Build, test, and organise sandbox agents',
   },
 ];
 
@@ -40,35 +35,65 @@ export default function AdminShell({
   onLogout,
   children,
 }) {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
   const navItems = NAV_ITEMS;
   const active = getNavItem(activePage);
   const displayName = user?.displayName || user?.userId || 'Administrator';
 
-  const toggleSidebar = () => {
-    setSidebarCollapsed((previous) => !previous);
+  const toggleNav = () => {
+    setNavOpen((previous) => !previous);
+  };
+
+  const handleSelectPage = (key) => {
+    onSelectPage?.(key);
+    setNavOpen(false);
   };
 
   return (
     <div className={styles.container}>
-      <aside
-        className={`${styles.sidebar} ${sidebarCollapsed ? styles.sidebarCollapsed : ''}`}
-        aria-hidden={sidebarCollapsed}
-      >
-        <div className={styles.sidebarHeader}>
-          <div className={styles.brand}>Homework admin</div>
-          <button
-            type="button"
-            className={styles.sidebarToggle}
-            onClick={toggleSidebar}
-            aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
-            aria-expanded={!sidebarCollapsed}
-            aria-controls="admin-navigation"
-          >
-            {sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-          </button>
-        </div>
-        <nav id="admin-navigation" className={styles.nav}>
+      <div className={styles.main}>
+        <header className={styles.topbar}>
+          <div className={styles.brandBlock}>
+            <div className={styles.brand}>Homework Funhouse</div>
+            <span className={styles.brandTag}>Admin Playground</span>
+          </div>
+          <div className={styles.topbarControls}>
+            <button
+              type="button"
+              className={styles.navToggle}
+              onClick={toggleNav}
+              aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
+              aria-expanded={navOpen}
+              aria-controls="admin-navigation"
+            >
+              {navOpen ? <CloseOutlined /> : <MenuOutlined />}
+            </button>
+            <div className={styles.userMenu}>
+              <div className={styles.profile}>
+                <div className={styles.profileAvatar}>{getInitials(displayName)}</div>
+                <div>
+                  <div className={styles.profileName}>{displayName}</div>
+                  <div className={styles.profileRole}>Administrator</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                className={styles.logoutButton}
+                onClick={onLogout}
+                aria-label="Log out"
+                title="Log out"
+              >
+                <LogoutOutlined aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <nav
+          id="admin-navigation"
+          className={`${styles.nav} ${navOpen ? styles.navOpen : ''}`}
+          aria-label="Admin sections"
+        >
           {navItems.map((item) => {
             const isActive = item.key === active.key;
             return (
@@ -76,53 +101,22 @@ export default function AdminShell({
                 key={item.key}
                 type="button"
                 className={`${styles.navButton} ${isActive ? styles.navButtonActive : ''}`}
-                onClick={() => onSelectPage?.(item.key)}
+                onClick={() => handleSelectPage(item.key)}
               >
-                <span>{item.label}</span>
-                <div className={styles.navHint}>
-                  {item.hint}
-                </div>
+                <span className={styles.navLabel}>{item.label}</span>
+                <span className={styles.navHint}>{item.hint}</span>
               </button>
             );
           })}
         </nav>
-      </aside>
 
-      <div className={styles.main}>
-        <header className={styles.topbar}>
-          <div className={styles.topbarTitleGroup}>
-            <button
-              type="button"
-              className={styles.sidebarTrigger}
-              onClick={toggleSidebar}
-              aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
-              aria-expanded={!sidebarCollapsed}
-              aria-controls="admin-navigation"
-            >
-              {sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-            </button>
-            <div className={styles.topbarTitle}>{active.label}</div>
+        <main className={styles.content}>
+          <div className={styles.pageHeader}>
+            <h1 className={styles.pageTitle}>{active.label}</h1>
+            <p className={styles.pageHint}>{active.hint}</p>
           </div>
-          <div className={styles.userMenu}>
-            <div className={styles.profile}>
-              <div className={styles.profileAvatar}>{getInitials(displayName)}</div>
-              <div>
-                <div className={styles.profileName}>{displayName}</div>
-                <div className={styles.profileRole}>Administrator</div>
-              </div>
-            </div>
-            <button
-              type="button"
-              className={styles.logoutButton}
-              onClick={onLogout}
-              aria-label="Log out"
-              title="Log out"
-            >
-              <LogoutOutlined aria-hidden="true" />
-            </button>
-          </div>
-        </header>
-        <main className={styles.content}>{children}</main>
+          {children}
+        </main>
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import AdminShell, { NAV_ITEMS } from './AdminShell';
 import FloppyBuilder from './FloppyBuilder';
 import SandboxBuilder from './SandboxBuilder';
 import SandboxManager from './SandboxManager';
+import styles from './admin.module.css';
 import {
   adminLogin,
   adminLogout,
@@ -378,16 +379,11 @@ export default function AdminPortal() {
 
   const handleSelectSandbox = useCallback((sandbox) => {
     setActiveSandbox(sandbox ? { ...sandbox } : null);
-  }, []);
-
-  const handleOpenSandboxInBuilder = useCallback((sandbox) => {
-    handleSelectSandbox(sandbox);
     setActivePage('sandbox');
-  }, [handleSelectSandbox]);
+  }, [setActivePage]);
 
   const handleCreateNewSandboxDraft = useCallback(() => {
     handleSelectSandbox(null);
-    setActivePage('sandbox');
   }, [handleSelectSandbox]);
 
   const handleClearActiveSandbox = useCallback(() => {
@@ -507,37 +503,40 @@ export default function AdminPortal() {
       ) : null}
 
       {activePage === 'sandbox' ? (
-        <SandboxBuilder
-          floppies={floppies}
-          loadingFloppies={floppyLoading}
-          onRefresh={() => loadFloppiesWithToken(session.token)}
-          sandboxSession={sandboxSession}
-          sandboxHistory={sandboxHistory}
-          sandboxLoading={sandboxLoading}
-          sandboxSending={sandboxSending}
-          sandboxError={sandboxError}
-          onStartSandbox={handleStartSandbox}
-          onSendMessage={handleSendSandboxMessage}
-          onSaveSandbox={handleSaveSandbox}
-          savingSandbox={savingSandbox}
-          activeSandbox={activeSandbox}
-          onResetActiveSandbox={handleClearActiveSandbox}
-        />
-      ) : null}
-
-      {activePage === 'sandbox-manager' ? (
-        <SandboxManager
-          sandboxes={sandboxes}
-          loading={sandboxesLoading}
-          error={sandboxesError}
-          onRefresh={handleRefreshSandboxes}
-          onSelect={handleOpenSandboxInBuilder}
-          onDelete={handleDeleteSandbox}
-          onCreateNew={handleCreateNewSandboxDraft}
-          activeSandboxId={activeSandbox?.id}
-          deletingSandboxId={sandboxDeletingId}
-          floppies={floppies}
-        />
+        <div className={styles.sandboxStudio}>
+          <div className={styles.sandboxStudioPrimary}>
+            <SandboxBuilder
+              floppies={floppies}
+              loadingFloppies={floppyLoading}
+              onRefresh={() => loadFloppiesWithToken(session.token)}
+              sandboxSession={sandboxSession}
+              sandboxHistory={sandboxHistory}
+              sandboxLoading={sandboxLoading}
+              sandboxSending={sandboxSending}
+              sandboxError={sandboxError}
+              onStartSandbox={handleStartSandbox}
+              onSendMessage={handleSendSandboxMessage}
+              onSaveSandbox={handleSaveSandbox}
+              savingSandbox={savingSandbox}
+              activeSandbox={activeSandbox}
+              onResetActiveSandbox={handleClearActiveSandbox}
+            />
+          </div>
+          <aside className={styles.sandboxStudioAside}>
+            <SandboxManager
+              sandboxes={sandboxes}
+              loading={sandboxesLoading}
+              error={sandboxesError}
+              onRefresh={handleRefreshSandboxes}
+              onSelect={handleSelectSandbox}
+              onDelete={handleDeleteSandbox}
+              onCreateNew={handleCreateNewSandboxDraft}
+              activeSandboxId={activeSandbox?.id}
+              deletingSandboxId={sandboxDeletingId}
+              floppies={floppies}
+            />
+          </aside>
+        </div>
       ) : null}
     </AdminShell>
   );

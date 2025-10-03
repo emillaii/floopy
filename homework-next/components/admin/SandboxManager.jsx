@@ -88,7 +88,7 @@ export default function SandboxManager({
           <div>
             <h2 className={styles.cardTitle}>Saved sandboxes</h2>
             <p className={styles.cardSubtitle}>
-              Manage reusable character cards and prompts for quick sandbox testing.
+              Pick a saved agent to instantly load its persona and floppy into the builder.
             </p>
           </div>
           <div className={styles.managerActions}>
@@ -154,10 +154,10 @@ export default function SandboxManager({
                       type="button"
                       className={styles.primaryButton}
                       onClick={() => handleOpen(sandbox)}
-                      aria-label="Open sandbox in builder"
+                      aria-label="Load sandbox in builder"
                     >
                       <EditOutlined aria-hidden="true" />
-                      <span>Open in builder</span>
+                      <span>Load sandbox</span>
                     </button>
                     <button
                       type="button"
