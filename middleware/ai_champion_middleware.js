@@ -13,6 +13,8 @@ const { MessageStore } = require('./message_store');
 const { AuthStore } = require('./auth_store');
 const { PgUserStore, PgAuthStore, PgSessionStore, PgMessageStore, PgFloppyStore, PgSandboxStore } = require('./postgres_stores');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const { loadEnv } = require('./utils/env');
 const { buildChunkObjects, extractTextFromFile } = require('./utils/knowledge');
@@ -20,6 +22,98 @@ const { buildChunkObjects, extractTextFromFile } = require('./utils/knowledge');
 loadEnv();
 
 const fetch = global.fetch || ((...args) => import('node-fetch').then(({ default: f }) => f(...args)));
+
+const originalConsole = {
+  log: console.log.bind(console),
+  info: (console.info || console.log).bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+  debug: (console.debug || console.log).bind(console),
+};
+
+const logDirectory = process.env.CHAMPION_LOG_DIR
+  ? path.resolve(process.env.CHAMPION_LOG_DIR)
+  : path.resolve(__dirname, '../logs');
+const logFilePath = process.env.CHAMPION_LOG_FILE
+  ? path.resolve(process.env.CHAMPION_LOG_FILE)
+  : path.join(logDirectory, 'ai_champion.log');
+const mirrorLogsToConsole = parseBoolean(process.env.CHAMPION_LOG_STDOUT ?? 'false');
+const captureConsole = parseBoolean(process.env.CHAMPION_LOG_CAPTURE_CONSOLE ?? 'true');
+const logLevelName = (process.env.CHAMPION_LOG_LEVEL || 'info').toLowerCase();
+
+const LOG_LEVELS = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+};
+
+const effectiveLogLevel = LOG_LEVELS[logLevelName] || LOG_LEVELS.info;
+
+let logFileAvailable = true;
+try {
+  fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
+} catch (err) {
+  originalConsole.warn('[Champion][Logging] Failed to prepare log directory:', err?.message || err);
+  logFileAvailable = false;
+}
+
+const normaliseLogPart = (part) => {
+  if (part instanceof Error) {
+    return part.stack || part.message || String(part);
+  }
+  if (typeof part === 'object' && part !== null) {
+    try {
+      return JSON.stringify(part);
+    } catch (err) {
+      return String(part);
+    }
+  }
+  return String(part);
+};
+
+const appendLog = (level, parts) => {
+  if ((LOG_LEVELS[level] || LOG_LEVELS.info) < effectiveLogLevel) {
+    if (mirrorLogsToConsole || level === 'error') {
+      const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : level === 'debug' ? 'debug' : 'log';
+      originalConsole[method](...parts);
+    }
+    return;
+  }
+
+  const timestamp = new Date().toISOString();
+  const message = parts.map(normaliseLogPart).join(' ');
+  const line = `[${timestamp}] [${level.toUpperCase()}] ${message}\n`;
+
+  if (logFileAvailable) {
+    fs.appendFile(logFilePath, line, (err) => {
+      if (err) {
+        logFileAvailable = false;
+        originalConsole.error('[Champion][Logging] Failed to append log file:', err?.message || err);
+      }
+    });
+  }
+
+  if (mirrorLogsToConsole || level === 'error') {
+    const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : level === 'debug' ? 'debug' : 'log';
+    originalConsole[method](line.trim());
+  }
+};
+
+const logger = {
+  info: (...parts) => appendLog('info', parts),
+  warn: (...parts) => appendLog('warn', parts),
+  error: (...parts) => appendLog('error', parts),
+  debug: (...parts) => appendLog('debug', parts),
+};
+
+if (captureConsole) {
+  console.log = (...parts) => logger.info(...parts);
+  console.info = (...parts) => logger.info(...parts);
+  console.warn = (...parts) => logger.warn(...parts);
+  console.error = (...parts) => logger.error(...parts);
+  console.debug = (...parts) => logger.debug(...parts);
+}
 
 function parseNumber(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -60,7 +154,7 @@ if (pineconeConfig.enabled) {
   try {
     pineconeClient = new Pinecone({ apiKey: pineconeApiKey });
   } catch (err) {
-    console.warn('[Champion][Pinecone] Failed to initialise client:', err?.message || err);
+    logger.warn('[Champion][Pinecone] Failed to initialise client:', err?.message || err);
     pineconeClient = null;
   }
 }
@@ -117,6 +211,15 @@ function isPineconeNotFound(err) {
   return message.includes('404') || message.includes('not found');
 }
 
+function extractCaseIdsFromText(text) {
+  if (!text) return [];
+  const matches = String(text)
+    .toUpperCase()
+    .match(/CS\d{5,}/g);
+  if (!matches) return [];
+  return Array.from(new Set(matches));
+}
+
 async function waitForPineconeIndexReady(indexName, { timeoutMs = 180_000, pollMs = 5_000 } = {}) {
   if (!pineconeClient) return;
   const deadline = Date.now() + timeoutMs;
@@ -133,7 +236,7 @@ async function waitForPineconeIndexReady(indexName, { timeoutMs = 180_000, pollM
     }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
-  console.warn(`[Champion][Pinecone] Timed out waiting for index ${indexName} to become ready.`);
+  logger.warn(`[Champion][Pinecone] Timed out waiting for index ${indexName} to become ready.`);
 }
 
 async function ensureTenantIndex(tenantId, dimension) {
@@ -153,7 +256,7 @@ async function ensureTenantIndex(tenantId, dimension) {
     if (isPineconeNotFound(err)) {
       exists = false;
     } else {
-      console.warn('[Champion][Pinecone] describeIndex failed:', err?.message || err);
+      logger.warn('[Champion][Pinecone] describeIndex failed:', err?.message || err);
       throw err;
     }
   }
@@ -161,7 +264,7 @@ async function ensureTenantIndex(tenantId, dimension) {
   if (exists) {
     const existingDimension = description?.dimension || description?.spec?.dimension;
     if (existingDimension && existingDimension !== dimension) {
-      console.warn(`[Champion][Pinecone] Index ${indexName} dimension mismatch (${existingDimension} !== ${dimension}). Using existing index.`);
+      logger.warn(`[Champion][Pinecone] Index ${indexName} dimension mismatch (${existingDimension} !== ${dimension}). Using existing index.`);
     }
   } else {
     const spec = pineconeConfig.podType
@@ -257,7 +360,7 @@ async function syncFloppyToPinecone(tenantId, floppy) {
         await index.namespace(namespace).deleteAll();
       } catch (err) {
         if (!isPineconeNotFound(err)) {
-          console.warn('[Champion][Pinecone] Failed to clear namespace for empty floppy:', err?.message || err);
+          logger.warn('[Champion][Pinecone] Failed to clear namespace for empty floppy:', err?.message || err);
         }
       }
     }
@@ -266,19 +369,19 @@ async function syncFloppyToPinecone(tenantId, floppy) {
 
   const embeddings = await embedTextsWithOllama(prepared.map((item) => item.text));
   if (!embeddings.length) {
-    console.warn('[Champion][Pinecone] Skipping sync — no embeddings generated.');
+    logger.warn('[Champion][Pinecone] Skipping sync — no embeddings generated.');
     return;
   }
 
   const dimension = embeddings[0]?.length;
   if (!dimension) {
-    console.warn('[Champion][Pinecone] Skipping sync — embedding dimension missing.');
+    logger.warn('[Champion][Pinecone] Skipping sync — embedding dimension missing.');
     return;
   }
 
   const ensuredIndexName = await ensureTenantIndex(tenantId, dimension);
   if (!ensuredIndexName) {
-    console.warn('[Champion][Pinecone] Unable to ensure index for tenant', tenantId);
+    logger.warn('[Champion][Pinecone] Unable to ensure index for tenant', tenantId);
     return;
   }
 
@@ -289,7 +392,7 @@ async function syncFloppyToPinecone(tenantId, floppy) {
     await namespaceHandle.deleteAll();
   } catch (err) {
     if (!isPineconeNotFound(err)) {
-      console.warn('[Champion][Pinecone] Failed to purge namespace before upsert:', err?.message || err);
+      logger.warn('[Champion][Pinecone] Failed to purge namespace before upsert:', err?.message || err);
     }
   }
 
@@ -309,7 +412,7 @@ async function syncFloppyToPinecone(tenantId, floppy) {
   }));
 
   await namespaceHandle.upsert(vectors);
-  console.log(`[Champion][Pinecone] Synced ${vectors.length} vectors for floppy ${floppy.id} in index ${ensuredIndexName}.`);
+  logger.info(`[Champion][Pinecone] Synced ${vectors.length} vectors for floppy ${floppy.id} in index ${ensuredIndexName}.`);
 }
 
 async function deleteFloppyFromPinecone(tenantId, floppyId) {
@@ -319,10 +422,10 @@ async function deleteFloppyFromPinecone(tenantId, floppyId) {
   try {
     const index = pineconeClient.index(indexName);
     await index.namespace(namespace).deleteAll();
-    console.log(`[Champion][Pinecone] Cleared namespace for floppy ${floppyId} in index ${indexName}.`);
+    logger.info(`[Champion][Pinecone] Cleared namespace for floppy ${floppyId} in index ${indexName}.`);
   } catch (err) {
     if (isPineconeNotFound(err)) return;
-    console.warn('[Champion][Pinecone] Failed to delete namespace:', err?.message || err);
+    logger.warn('[Champion][Pinecone] Failed to delete namespace:', err?.message || err);
   }
 }
 
@@ -472,7 +575,7 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
       const embeddings = await embedTextsWithOllama([text]);
       vector = embeddings[0];
     } catch (err) {
-      console.warn('[Champion][Pinecone] Failed to embed query:', err?.message || err);
+      logger.warn('[Champion][Pinecone] Failed to embed query:', err?.message || err);
       return [];
     }
 
@@ -482,6 +585,8 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
 
     const limit = Math.max(1, Math.min(20, topK || maxTopK));
     const aggregated = [];
+    const queryCaseIds = extractCaseIdsFromText(text);
+    const queryCaseIdsLower = queryCaseIds.map((id) => id.toLowerCase());
 
     for (const target of resolvedTargets) {
       try {
@@ -500,12 +605,58 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
           aggregated.push({ target, match });
         });
       } catch (err) {
-        console.warn(`[Champion][Pinecone] Query failed for index ${target.indexName}:`, err?.message || err);
+        logger.warn(`[Champion][Pinecone] Query failed for index ${target.indexName}:`, err?.message || err);
       }
     }
 
     const tokens = text.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) || [];
     const uniqueTokens = Array.from(new Set(tokens));
+    const directCaseMatches = [];
+    if (queryCaseIdsLower.length && knowledgeChunks.length) {
+      knowledgeChunks.forEach((chunk, idx) => {
+        const chunkTextRaw = typeof chunk?.text === 'string' ? chunk.text : String(chunk?.content || '');
+        if (!chunkTextRaw) return;
+        const lower = chunkTextRaw.toLowerCase();
+        const matchedIds = queryCaseIdsLower.filter((id) => lower.includes(id));
+        if (!matchedIds.length) return;
+
+        const chunkMetadata = (chunk && typeof chunk.metadata === 'object') ? { ...chunk.metadata } : {};
+        const chunkId = chunk.id || chunkMetadata.chunkId || `${floppy.id}:chunk:${idx}`;
+        const keywordSet = new Set(
+          Array.isArray(chunkMetadata.keywords)
+            ? chunkMetadata.keywords.map((word) => (typeof word === 'string' ? word.trim() : '')).filter(Boolean)
+            : [],
+        );
+        matchedIds.forEach((id) => keywordSet.add(id));
+
+        const sourceLabel = chunkMetadata.sourceName
+          || chunkMetadata.title
+          || chunkMetadata.filename
+          || chunkMetadata.documentTitle
+          || chunkMetadata.source
+          || chunkMetadata.groupName
+          || chunk.name
+          || chunkId;
+
+        directCaseMatches.push({
+          id: chunkId,
+          score: 0.999,
+          metadata: {
+            ...chunkMetadata,
+            origin: 'case-id',
+            chunkId,
+            sourceName: sourceLabel,
+            keywords: Array.from(keywordSet),
+            matchedCaseIds: matchedIds.map((id) => id.toUpperCase()),
+            text: chunkTextRaw,
+          },
+        });
+      });
+      if (directCaseMatches.length) {
+        logger.debug('[Champion][CaseId] Direct matches found for query', { caseIds: queryCaseIds, matches: directCaseMatches.length });
+      }
+    }
+
     const lexicalMatches = [];
     if (uniqueTokens.length && knowledgeChunks.length) {
       const strongTokens = uniqueTokens.filter((token) => token.length > 2);
@@ -515,6 +666,9 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
         const chunkTextRaw = typeof chunk?.text === 'string' ? chunk.text : String(chunk?.content || '');
         if (!chunkTextRaw) return;
         const chunkText = chunkTextRaw.toLowerCase();
+        if (queryCaseIdsLower.length && !queryCaseIdsLower.some((id) => chunkText.includes(id))) {
+          return;
+        }
         const hits = searchTokens.filter((token) => chunkText.includes(token));
         if (!hits.length) return;
 
@@ -526,6 +680,13 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
             : [],
         );
         hits.forEach((word) => keywordSet.add(word));
+        if (queryCaseIdsLower.length) {
+          queryCaseIdsLower.forEach((id) => {
+            if (chunkText.includes(id)) {
+              keywordSet.add(id.toUpperCase());
+            }
+          });
+        }
 
         const sourceLabel = chunkMetadata.sourceName
           || chunkMetadata.title
@@ -553,10 +714,16 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
       });
 
       if (lexicalMatches.length) {
-        console.log(`[Champion][Lexical] Added ${lexicalMatches.length} keyword match${lexicalMatches.length === 1 ? '' : 'es'} from local knowledge search.`);
+        logger.info(`[Champion][Lexical] Added ${lexicalMatches.length} keyword match${lexicalMatches.length === 1 ? '' : 'es'} from local knowledge search.`);
       }
     }
 
+    directCaseMatches.forEach((match) => {
+      aggregated.push({
+        target: { indexName: match.metadata.pineconeIndex || null, namespace: match.metadata.pineconeNamespace || null },
+        match,
+      });
+    });
     lexicalMatches.forEach((match) => {
       aggregated.push({
         target: { indexName: match.metadata.pineconeIndex || null, namespace: match.metadata.pineconeNamespace || null },
@@ -569,29 +736,33 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
     });
 
     if (!aggregated.length) {
-      console.log(`[Champion][Pinecone] No knowledge hits for ${floppy.id} across ${resolvedTargets.length} index${resolvedTargets.length === 1 ? '' : 'es'}.`);
+      logger.info(`[Champion][Pinecone] No knowledge hits for ${floppy.id} across ${resolvedTargets.length} index${resolvedTargets.length === 1 ? '' : 'es'}.`);
       return [];
     }
 
     aggregated.sort((a, b) => (b.match?.score ?? 0) - (a.match?.score ?? 0));
+    const effectiveLimit = Math.max(1, limit);
     const seen = new Set();
     const results = [];
-    aggregated.forEach(({ target, match }) => {
+    for (const { target, match } of aggregated) {
+      if (results.length >= effectiveLimit) {
+        break;
+      }
       const metadata = match?.metadata || {};
       const snippet = typeof metadata.text === 'string' && metadata.text.trim()
         ? metadata.text.trim()
         : typeof metadata.snippet === 'string' && metadata.snippet.trim()
           ? metadata.snippet.trim()
           : '';
-      if (!snippet) return;
+      if (!snippet) continue;
       const docId = metadata.chunkId || metadata.id || match.id;
-      if (!docId || seen.has(docId)) return;
+      if (!docId || seen.has(docId)) continue;
       seen.add(docId);
 
       const enrichedMetadata = {
         ...metadata,
-        pineconeIndex: target.indexName,
-        pineconeNamespace: target.namespace,
+        pineconeIndex: target.indexName || metadata.pineconeIndex || null,
+        pineconeNamespace: target.namespace || metadata.pineconeNamespace || null,
         score: match?.score,
       };
 
@@ -619,9 +790,36 @@ function createPineconeMemoryProvider({ floppy, tenantId, targets }) {
           metadata: JSON.stringify(enrichedMetadata),
         },
       });
-    });
+    }
 
-    console.log(`[Champion][Pinecone] Retrieved ${results.length} knowledge chunk${results.length === 1 ? '' : 's'} for ${floppy.id} across ${resolvedTargets.length} index${resolvedTargets.length === 1 ? '' : 'es'}.`);
+    logger.info(`[Champion][Pinecone] Retrieved ${results.length} knowledge chunk${results.length === 1 ? '' : 's'} for ${floppy.id} across ${resolvedTargets.length} index${resolvedTargets.length === 1 ? '' : 'es'}.`);
+    if (results.length) {
+      const contextPreview = results.map((item) => {
+        const fields = item?.Fields || {};
+        let meta = {};
+        try {
+          meta = fields.metadata ? JSON.parse(fields.metadata) : {};
+        } catch (_) {
+          meta = {};
+        }
+        const snippet = typeof fields.content === 'string' ? fields.content : '';
+        return {
+          docId: fields.doc_id,
+          score: item?.Score,
+          origin: meta.origin || 'pinecone',
+          index: meta.pineconeIndex || null,
+          namespace: meta.pineconeNamespace || null,
+          source: meta.sourceName || meta.title || meta.filename || null,
+          snippet: snippet.length > 600 ? `${snippet.slice(0, 600)}…` : snippet,
+        };
+      });
+      logger.debug('[Champion][Pinecone] Context prepared for LLM', {
+        query: text,
+        limit,
+        returned: results.length,
+        contexts: contextPreview,
+      });
+    }
     return results;
   };
 }
@@ -631,7 +829,7 @@ const scheduleFloppySync = (tenantId, floppy) => {
   Promise.resolve()
     .then(() => syncFloppyToPinecone(tenantId, floppy))
     .catch((err) => {
-      console.warn('[Champion][Pinecone] Sync failed:', err?.message || err);
+      logger.warn('[Champion][Pinecone] Sync failed:', err?.message || err);
     });
 };
 
@@ -640,7 +838,7 @@ const scheduleFloppyDelete = (tenantId, floppyId) => {
   Promise.resolve()
     .then(() => deleteFloppyFromPinecone(tenantId, floppyId))
     .catch((err) => {
-      console.warn('[Champion][Pinecone] Namespace cleanup failed:', err?.message || err);
+      logger.warn('[Champion][Pinecone] Namespace cleanup failed:', err?.message || err);
     });
 };
 
@@ -718,7 +916,7 @@ async function initialiseStores() {
   const mongoUri = process.env.MONGO_URI;
 
   if (postgresUrl) {
-    console.log('[Champion] Initialising PostgreSQL stores via', maskConnectionString(postgresUrl));
+    logger.info('[Champion] Initialising PostgreSQL stores via', maskConnectionString(postgresUrl));
     const pgConfig = {
       connectionString: postgresUrl,
       logger: console,
@@ -758,7 +956,7 @@ async function initialiseStores() {
   }
 
   if (mongoUri) {
-    console.log('[Champion] Initialising MongoDB stores via', maskConnectionString(mongoUri));
+    logger.info('[Champion] Initialising MongoDB stores via', maskConnectionString(mongoUri));
     const baseConfig = { uri: mongoUri, dbName: process.env.MONGO_DB_NAME };
     const characterStore = await initMongoStore(CharacterStore, {
       ...baseConfig,
@@ -788,7 +986,7 @@ async function initialiseStores() {
     return { characterStore, userStore, sessionStore, authStore, messageStore, floppyStore: null, sandboxStore: null };
   }
 
-  console.log('[Champion] No database configured, falling back to in-memory stores');
+  logger.info('[Champion] No database configured, falling back to in-memory stores');
   return {
     characterStore: null,
     userStore: null,
@@ -1388,54 +1586,65 @@ async function startServer() {
         Async: false,
       });
     } catch (err) {
-      console.warn('[Champion][Sandbox] Failed to upsert knowledge batch:', err?.message || err);
+      logger.warn('[Champion][Sandbox] Failed to upsert knowledge batch:', err?.message || err);
     }
   };
 
-  const seedSandboxKnowledge = async (session, floppy) => {
-    if (!session || !floppy) return [];
-    const chunks = Array.isArray(floppy.knowledgeChunks) ? floppy.knowledgeChunks : [];
-    if (!chunks.length) return [];
+  const seedSandboxKnowledge = async (session, floppiesInput) => {
+    if (!session) return [];
+    const floppies = Array.isArray(floppiesInput)
+      ? floppiesInput.filter(Boolean)
+      : floppiesInput
+        ? [floppiesInput]
+        : [];
+    if (!floppies.length) return [];
 
-    const entries = chunks
-      .map((chunk, index) => {
-        if (!chunk) return null;
-        if (typeof chunk === 'string') {
-          const text = chunk.trim();
+    const entries = floppies
+      .flatMap((floppy) => {
+        if (!floppy) return [];
+        const chunks = Array.isArray(floppy.knowledgeChunks) ? floppy.knowledgeChunks : [];
+        if (!chunks.length) return [];
+        const floppyId = floppy.id || 'unknown';
+        const floppyTitle = floppy.title || '';
+        return chunks.map((chunk, index) => {
+          if (!chunk) return null;
+          if (typeof chunk === 'string') {
+            const text = chunk.trim();
+            if (!text) return null;
+            return {
+              sessionId: session.sessionId,
+              text,
+              metadata: {
+                source: 'floppy',
+                floppyId,
+                floppyTitle,
+                sourceType: 'manual',
+                sourceName: 'Manual knowledge',
+                chunkId: `${floppyId}:manual:${index}`,
+              },
+            };
+          }
+
+          const text = String(chunk.text || '').trim();
           if (!text) return null;
+          const baseMetadata = {
+            source: 'floppy',
+            floppyId,
+            floppyTitle,
+            chunkId: chunk.id || `${floppyId}:chunk:${index}`,
+            sourceType: chunk.sourceType || 'manual',
+            sourceName: chunk.sourceName || 'Manual knowledge',
+          };
+          const metadata = {
+            ...baseMetadata,
+            ...(chunk.metadata || {}),
+          };
           return {
             sessionId: session.sessionId,
             text,
-            metadata: {
-              source: 'floppy',
-              floppyId: floppy.id,
-              floppyTitle: floppy.title,
-              sourceType: 'manual',
-              sourceName: 'Manual knowledge',
-              chunkId: `${floppy.id}:manual:${index}`,
-            },
+            metadata,
           };
-        }
-
-        const text = String(chunk.text || '').trim();
-        if (!text) return null;
-        const baseMetadata = {
-          source: 'floppy',
-          floppyId: floppy.id,
-          floppyTitle: floppy.title,
-          chunkId: chunk.id || `${floppy.id}:chunk:${index}`,
-          sourceType: chunk.sourceType || 'manual',
-          sourceName: chunk.sourceName || 'Manual knowledge',
-        };
-        const metadata = {
-          ...baseMetadata,
-          ...(chunk.metadata || {}),
-        };
-        return {
-          sessionId: session.sessionId,
-          text,
-          metadata,
-        };
+        });
       })
       .filter((entry) => entry && entry.text);
 
@@ -1478,12 +1687,12 @@ async function startServer() {
         const hasCredential = await authStore.hasCredential(userId);
         if (!hasCredential && userId === DEFAULT_ADMIN_USER && DEFAULT_ADMIN_PASSWORD) {
           await authStore.setCredential(userId, String(DEFAULT_ADMIN_PASSWORD));
-          console.log(`[Champion] Provisioned default admin credential for ${userId}`);
+          logger.info(`[Champion] Provisioned default admin credential for ${userId}`);
         } else if (!hasCredential && userId === DEFAULT_ADMIN_USER && !DEFAULT_ADMIN_PASSWORD) {
-          console.warn(`[Champion] Admin user ${userId} is configured but no password has been provisioned.`);
+          logger.warn(`[Champion] Admin user ${userId} is configured but no password has been provisioned.`);
         }
       } catch (err) {
-        console.warn(`[Champion] Failed to ensure admin credentials for ${userId}:`, err?.message || err);
+        logger.warn(`[Champion] Failed to ensure admin credentials for ${userId}:`, err?.message || err);
       }
 
       if (!manager.getUserProfile(userId)) {
@@ -1500,10 +1709,10 @@ async function startServer() {
               try {
                 await manager.reloadUsers();
               } catch (reloadErr) {
-                console.warn('[Champion] Failed to reload users for admin provisioning:', reloadErr?.message || reloadErr);
+                logger.warn('[Champion] Failed to reload users for admin provisioning:', reloadErr?.message || reloadErr);
               }
             } else {
-              console.warn(`[Champion] Failed to ensure admin profile for ${userId}:`, err?.message || err);
+              logger.warn(`[Champion] Failed to ensure admin profile for ${userId}:`, err?.message || err);
             }
           }
         } else {
@@ -1960,6 +2169,9 @@ async function startServer() {
       const level = levelRaw || 'primary';
       const metadata = req.body?.metadata ?? null;
       const knowledge = typeof req.body?.knowledge === 'string' ? req.body.knowledge : '';
+      const knowledgeGroups = Array.isArray(req.body?.knowledgeGroups)
+        ? req.body.knowledgeGroups
+        : [];
 
       if (!title) {
         return res.status(400).json({ error: 'Title is required' });
@@ -1972,6 +2184,7 @@ async function startServer() {
         level,
         knowledge,
         metadata,
+        knowledgeGroups,
         createdBy: req.adminUserId,
       });
 
@@ -1995,6 +2208,11 @@ async function startServer() {
       if (req.body?.metadata !== undefined) payload.metadata = req.body.metadata;
       if (req.body?.knowledge !== undefined) {
         payload.knowledge = typeof req.body.knowledge === 'string' ? req.body.knowledge : '';
+      }
+      if (req.body?.knowledgeGroups !== undefined) {
+        payload.knowledgeGroups = Array.isArray(req.body.knowledgeGroups)
+          ? req.body.knowledgeGroups
+          : [];
       }
       payload.updatedBy = req.adminUserId;
 
@@ -2196,7 +2414,14 @@ async function startServer() {
   app.post('/api/admin/sandbox/session', requireAdminAuth, async (req, res) => {
     try {
       const sandboxIdRaw = (req.body?.sandboxId || '').trim();
-      let floppyId = (req.body?.floppyId || '').trim();
+      const requestedFloppyIds = Array.isArray(req.body?.floppyIds)
+        ? req.body.floppyIds.map((value) => String(value || '').trim()).filter(Boolean)
+        : [];
+      const singleFloppyId = String(req.body?.floppyId || '').trim();
+      let floppyIds = Array.from(new Set([
+        ...requestedFloppyIds,
+        ...(singleFloppyId ? [singleFloppyId] : []),
+      ]));
 
       let sandboxConfig = null;
       if (sandboxIdRaw) {
@@ -2204,27 +2429,55 @@ async function startServer() {
         if (!sandboxConfig) {
           return res.status(404).json({ error: 'Sandbox not found' });
         }
-        if (!floppyId && sandboxConfig.floppyId) {
-          floppyId = sandboxConfig.floppyId;
+        const metadataFloppyIds = Array.isArray(sandboxConfig.metadata?.floppyIds)
+          ? sandboxConfig.metadata.floppyIds
+              .map((value) => String(value || '').trim())
+              .filter(Boolean)
+          : [];
+        if (!floppyIds.length && metadataFloppyIds.length) {
+          floppyIds = Array.from(new Set(metadataFloppyIds));
         }
-        if (sandboxConfig.floppyId && floppyId && sandboxConfig.floppyId !== floppyId) {
-          console.warn('[Admin][Sandbox] Requested floppy mismatch for sandbox', sandboxIdRaw);
+        const sandboxFloppyId = String(sandboxConfig.floppyId || '').trim();
+        if (!floppyIds.length && sandboxFloppyId) {
+          floppyIds = [sandboxFloppyId];
+        } else if (sandboxFloppyId && floppyIds.length && !floppyIds.includes(sandboxFloppyId)) {
+          logger.warn('[Admin][Sandbox] Requested floppy mismatch for sandbox', sandboxIdRaw);
         }
       }
 
-      if (!floppyId) {
-        return res.status(400).json({ error: 'floppyId is required' });
+      const uniqueFloppyIds = Array.from(new Set(floppyIds.filter(Boolean)));
+      if (!uniqueFloppyIds.length) {
+        return res.status(400).json({ error: 'At least one floppyId is required' });
       }
 
-      const floppy = await floppyStore.get(floppyId);
-      if (!floppy) {
-        return res.status(404).json({ error: 'Floppy not found' });
+      const floppies = [];
+      for (const id of uniqueFloppyIds) {
+        const floppy = await floppyStore.get(id);
+        if (!floppy) {
+          return res.status(404).json({ error: `Floppy not found: ${id}` });
+        }
+        floppies.push(floppy);
       }
 
-      const basePersona = HOMEWORK_PERSONAS[floppy.level] || HOMEWORK_PERSONAS.primary;
-      let personaName = `${floppy.title || 'Floppy'} Sandbox Coach`;
-      let personaPrompt = buildSandboxPersonaPrompt(floppy, basePersona.personaPrompt);
+      const primaryFloppy = floppies[0];
+      const basePersona = HOMEWORK_PERSONAS[primaryFloppy.level] || HOMEWORK_PERSONAS.primary;
+      let personaName = `${primaryFloppy.title || 'Floppy'} Sandbox Coach`;
+      let personaPrompt = buildSandboxPersonaPrompt(primaryFloppy, basePersona.personaPrompt);
       let personaImage = '';
+
+      if (floppies.length > 1) {
+        const additionalTitles = floppies
+          .slice(1)
+          .map((floppy) => `“${floppy.title || 'Untitled floppy'}”`)
+          .join(', ');
+        if (additionalTitles) {
+          const additionalPrompt = `You also have access to knowledge from ${additionalTitles}. Blend insights from every source when answering.`;
+          personaPrompt = [personaPrompt, additionalPrompt]
+            .map((part) => part && part.trim())
+            .filter(Boolean)
+            .join(' ');
+        }
+      }
 
       if (sandboxConfig) {
         if (sandboxConfig.title) {
@@ -2255,33 +2508,43 @@ async function startServer() {
       sessions.set(session.sessionId, session);
       syncSessionProfiles();
 
-      await seedSandboxKnowledge(session, floppy);
+      await seedSandboxKnowledge(session, floppies);
 
-      const tenantKey = floppy.tenantId || req.adminUserId;
-      const pineconeTargets = resolvePineconeTargetsForFloppy(floppy, tenantKey);
-      const pineconeProvider = createPineconeMemoryProvider({
-        floppy,
-        tenantId: tenantKey,
-        targets: pineconeTargets,
-      });
-      if (pineconeProvider && typeof session.addMemoryProvider === 'function') {
-        session.addMemoryProvider(pineconeProvider);
+      const pineconeMetadata = [];
+      for (const floppy of floppies) {
+        const tenantKey = floppy.tenantId || req.adminUserId;
+        const pineconeTargets = resolvePineconeTargetsForFloppy(floppy, tenantKey);
+        const pineconeProvider = createPineconeMemoryProvider({
+          floppy,
+          tenantId: tenantKey,
+          targets: pineconeTargets,
+        });
+        if (pineconeProvider && typeof session.addMemoryProvider === 'function') {
+          session.addMemoryProvider(pineconeProvider);
+        }
+        pineconeMetadata.push({
+          floppyId: floppy.id,
+          tenantId: tenantKey,
+          targets: pineconeTargets,
+        });
       }
 
       sandboxSessions.set(session.sessionId, {
-        floppyId,
+        floppyId: primaryFloppy?.id || null,
+        floppyIds: floppies.map((floppy) => floppy.id),
         adminUserId: req.adminUserId,
         personaName: session.persona.name,
         createdAt: new Date(),
         knowledgeLoaded: true,
-        pineconeTargets: pineconeProvider ? pineconeTargets : [],
+        pineconeTargets: pineconeMetadata,
         sandboxId: sandboxConfig?.id || null,
       });
 
       res.status(201).json({
         sessionId: session.sessionId,
         persona: session.persona,
-        floppy,
+        floppy: primaryFloppy,
+        floppies,
         user: session.userProfile,
         sandbox: sandboxConfig,
       });
@@ -2931,23 +3194,23 @@ async function startServer() {
     const existed = sessions.delete(sessionId);
     if (sessionStore) {
       sessionStore.deleteSession(sessionId).catch((err) => {
-        console.warn('Failed to delete session from store:', err);
+        logger.warn('Failed to delete session from store:', err);
       });
     }
     if (messageStore?.deleteBySession) {
       messageStore.deleteBySession(sessionId).catch((err) => {
-        console.warn('Failed to delete messages from store:', err);
+        logger.warn('Failed to delete messages from store:', err);
       });
     }
     res.json({ sessionId, removed: existed });
   });
 
   app.listen(PORT, () => {
-    console.log(`AI Champion middleware listening on http://localhost:${PORT}`);
+    logger.info(`AI Champion middleware listening on http://localhost:${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start AI Champion middleware:', err?.stack || err?.message || String(err));
+  logger.error('Failed to start AI Champion middleware:', err?.stack || err?.message || String(err));
   process.exit(1);
 });

@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { message } from 'antd';
 import {
   DeleteOutlined,
+  LoadingOutlined,
   PictureOutlined,
+  PlayCircleOutlined,
   SaveOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
@@ -43,19 +45,16 @@ export default function SandboxBuilder({
   loadingFloppies = false,
   onRefresh,
   sandboxSession,
-  sandboxHistory = [],
   sandboxLoading = false,
-  sandboxSending = false,
   sandboxError = '',
+  sandboxSending = false,
   onStartSandbox,
-  onSendMessage,
   onSaveSandbox,
   savingSandbox = false,
   activeSandbox = null,
   onResetActiveSandbox = () => {},
 }) {
-  const [selectedFloppyId, setSelectedFloppyId] = useState('');
-  const [inputMessage, setInputMessage] = useState('');
+  const [selectedFloppyIds, setSelectedFloppyIds] = useState([]);
   const [localError, setLocalError] = useState('');
   const [isKnowledgeModalOpen, setIsKnowledgeModalOpen] = useState(false);
   const [sandboxName, setSandboxName] = useState('');
@@ -64,29 +63,77 @@ export default function SandboxBuilder({
   const [backgroundAsset, setBackgroundAsset] = useState(null);
   const [currentSandboxId, setCurrentSandboxId] = useState('');
   const [localStatus, setLocalStatus] = useState('');
+  const [sandboxMetadata, setSandboxMetadata] = useState(null);
   const [messageApi, contextHolder] = message.useMessage();
 
   const hasFloppies = floppies.length > 0;
 
-  const previewFloppy = useMemo(() => {
-    if (!selectedFloppyId) return null;
-    return floppies.find((item) => item.id === selectedFloppyId) || null;
-  }, [floppies, selectedFloppyId]);
+  const selectedFloppies = useMemo(() => {
+    if (!selectedFloppyIds.length) return [];
+    const lookup = new Map((floppies || []).map((item) => [item.id, item]));
+    return selectedFloppyIds
+      .map((id) => lookup.get(id))
+      .filter(Boolean);
+  }, [floppies, selectedFloppyIds]);
 
-  const activeFloppy = sandboxSession?.floppy || previewFloppy || null;
+  const sessionFloppies = useMemo(() => {
+    if (Array.isArray(sandboxSession?.floppies) && sandboxSession.floppies.length) {
+      return sandboxSession.floppies;
+    }
+    if (sandboxSession?.floppy) {
+      return [sandboxSession.floppy];
+    }
+    return [];
+  }, [sandboxSession]);
+
+  const activeFloppies = sessionFloppies.length ? sessionFloppies : selectedFloppies;
+  const primaryFloppy = activeFloppies[0] || null;
   const knowledgeSnippetItems = useMemo(() => {
-    const incoming = Array.isArray(activeFloppy?.knowledgeChunks)
-      ? activeFloppy.knowledgeChunks
-      : [];
-    return incoming.map((chunk, index) => {
-      const text = typeof chunk === 'string' ? chunk : (chunk?.text || '');
-      const key = typeof chunk === 'object' && chunk?.id
-        ? chunk.id
-        : `${index}-${text.slice(0, 16) || 'empty'}`;
-      return { key, text };
-    });
-  }, [activeFloppy]);
+    return activeFloppies
+      .flatMap((floppy) => {
+        if (!floppy) return [];
+        const chunks = Array.isArray(floppy.knowledgeChunks) ? floppy.knowledgeChunks : [];
+        return chunks.map((chunk, index) => {
+          if (!chunk) return null;
+          const rawText = typeof chunk === 'string' ? chunk : (chunk?.text || '');
+          const text = String(rawText || '').trim();
+          if (!text) return null;
+          const baseKey = typeof chunk === 'object' && chunk?.id
+            ? chunk.id
+            : `${floppy.id || 'floppy'}-${index}-${text.slice(0, 16) || 'empty'}`;
+          return {
+            key: `${floppy.id || 'floppy'}-${baseKey}`,
+            text,
+            floppyTitle: floppy.title || 'Untitled floppy',
+          };
+        });
+      })
+      .filter(Boolean);
+  }, [activeFloppies]);
   const knowledgeSnippetCount = knowledgeSnippetItems.length;
+  const selectedFloppySummary = useMemo(() => {
+    if (!selectedFloppies.length) return '';
+    return selectedFloppies
+      .map((item) => item?.title || 'Untitled floppy')
+      .join(', ');
+  }, [selectedFloppies]);
+  const floppySelectSize = useMemo(() => {
+    const count = Array.isArray(floppies) ? floppies.length : 0;
+    return Math.min(8, Math.max(3, count || 0));
+  }, [floppies]);
+  const knowledgeModalSubject = useMemo(() => {
+    if (!activeFloppies.length) return '.';
+    if (activeFloppies.length === 1) {
+      return ` for “${activeFloppies[0].title || 'Untitled floppy'}”.`;
+    }
+    const titles = activeFloppies
+      .map((floppy) => `“${floppy.title || 'Untitled floppy'}”`);
+    if (titles.length <= 3) {
+      return ` for ${titles.join(', ')}.`;
+    }
+    const displayed = titles.slice(0, 3).join(', ');
+    return ` for ${displayed}, and ${titles.length - 3} more.`;
+  }, [activeFloppies]);
 
   const resetCharacterCard = useCallback(() => {
     setCurrentSandboxId('');
@@ -95,6 +142,8 @@ export default function SandboxBuilder({
     setAvatarAsset(null);
     setBackgroundAsset(null);
     setLocalStatus('');
+    setSelectedFloppyIds([]);
+    setSandboxMetadata(null);
   }, []);
 
   const applyActiveSandbox = useCallback((sandbox) => {
@@ -109,7 +158,21 @@ export default function SandboxBuilder({
         || sandbox.personaPrompt
         || ''
     );
-    setSelectedFloppyId(sandbox.floppyId || '');
+    const metadata = sandbox.metadata && typeof sandbox.metadata === 'object'
+      ? { ...sandbox.metadata }
+      : null;
+    setSandboxMetadata(metadata);
+    const metadataFloppyIds = Array.isArray(metadata?.floppyIds)
+      ? metadata.floppyIds
+      : Array.isArray(metadata?.selectedFloppyIds)
+        ? metadata.selectedFloppyIds
+        : [];
+    const normalisedMetadataIds = metadataFloppyIds
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+    const fallbackIds = sandbox.floppyId ? [sandbox.floppyId] : [];
+    const resolvedIds = normalisedMetadataIds.length ? normalisedMetadataIds : fallbackIds;
+    setSelectedFloppyIds(resolvedIds);
     setAvatarAsset(sandbox.characterCard?.avatar ? { ...sandbox.characterCard.avatar } : null);
     setBackgroundAsset(sandbox.characterCard?.background ? { ...sandbox.characterCard.background } : null);
     setLocalStatus('');
@@ -130,6 +193,15 @@ export default function SandboxBuilder({
   }, [knowledgeSnippetCount]);
 
   useEffect(() => {
+    if (!selectedFloppyIds.length) return;
+    const availableIds = new Set((floppies || []).map((item) => item.id));
+    const filtered = selectedFloppyIds.filter((id) => availableIds.has(id));
+    if (filtered.length !== selectedFloppyIds.length) {
+      setSelectedFloppyIds(filtered);
+    }
+  }, [floppies, selectedFloppyIds]);
+
+  useEffect(() => {
     if (!isKnowledgeModalOpen) {
       return undefined;
     }
@@ -147,35 +219,19 @@ export default function SandboxBuilder({
 
   const handleStart = async () => {
     setLocalError('');
-    if (!selectedFloppyId) {
-      setLocalError('Select a floppy to load into the sandbox.');
+    if (!selectedFloppyIds.length) {
+      setLocalError('Select at least one floppy to load into the sandbox.');
       return;
     }
     try {
       await onStartSandbox?.({
-        floppyId: selectedFloppyId,
+        floppyIds: selectedFloppyIds,
+        floppyId: selectedFloppyIds[0],
         sandboxId: currentSandboxId || undefined,
         personaPrompt: characterPrompt,
       });
-      setInputMessage('');
     } catch (err) {
       setLocalError(err?.message || 'Unable to start sandbox session.');
-    }
-  };
-
-  const handleSend = async (event) => {
-    event.preventDefault();
-    setLocalError('');
-    const trimmed = inputMessage.trim();
-    if (!trimmed) {
-      setLocalError('Enter a message to send to the sandbox agent.');
-      return;
-    }
-    try {
-      await onSendMessage?.(trimmed);
-      setInputMessage('');
-    } catch (err) {
-      setLocalError(err?.message || 'The sandbox agent could not process your message.');
     }
   };
 
@@ -219,6 +275,14 @@ export default function SandboxBuilder({
     }
   }, [messageApi]);
 
+  const handleFloppySelectionChange = useCallback((event) => {
+    const options = Array.from(event.target.selectedOptions || []);
+    const ids = Array.from(new Set(options.map((option) => String(option.value || '').trim()).filter(Boolean)));
+    setSelectedFloppyIds(ids);
+    setLocalStatus('');
+    setLocalError('');
+  }, []);
+
   const handleSaveSandboxClick = useCallback(async () => {
     if (!onSaveSandbox) return;
     const trimmedName = sandboxName.trim();
@@ -226,14 +290,19 @@ export default function SandboxBuilder({
       messageApi.open({ type: 'error', content: 'Sandbox name is required.' });
       return;
     }
-    if (!selectedFloppyId) {
-      messageApi.open({ type: 'error', content: 'Select a floppy before saving the sandbox.' });
+    if (!selectedFloppyIds.length) {
+      messageApi.open({ type: 'error', content: 'Select at least one floppy before saving the sandbox.' });
       return;
     }
+    const metadataPayload = sandboxMetadata && typeof sandboxMetadata === 'object'
+      ? { ...sandboxMetadata }
+      : {};
+    metadataPayload.floppyIds = selectedFloppyIds;
+    metadataPayload.selectedFloppyIds = selectedFloppyIds;
     const payload = {
       id: currentSandboxId || undefined,
       title: trimmedName,
-      floppyId: selectedFloppyId,
+      floppyId: selectedFloppyIds[0],
       personaPrompt: characterPrompt,
       characterCard: {
         name: trimmedName,
@@ -241,18 +310,20 @@ export default function SandboxBuilder({
         avatar: avatarAsset,
         background: backgroundAsset,
       },
+      metadata: Object.keys(metadataPayload).length ? metadataPayload : undefined,
     };
     try {
       const saved = await onSaveSandbox(payload);
       if (saved?.id) {
         setCurrentSandboxId(saved.id);
+        setSandboxMetadata(saved.metadata && typeof saved.metadata === 'object' ? { ...saved.metadata } : metadataPayload);
         setLocalStatus('Sandbox saved.');
         messageApi.open({ type: 'success', content: 'Sandbox saved.' });
       }
     } catch (err) {
       messageApi.open({ type: 'error', content: err?.message || 'Unable to save sandbox.' });
     }
-  }, [avatarAsset, backgroundAsset, characterPrompt, currentSandboxId, messageApi, onSaveSandbox, sandboxName, selectedFloppyId]);
+  }, [avatarAsset, backgroundAsset, characterPrompt, currentSandboxId, messageApi, onSaveSandbox, sandboxMetadata, sandboxName, selectedFloppyIds]);
 
   const handleClearSandboxSelection = useCallback(() => {
     resetCharacterCard();
@@ -268,12 +339,6 @@ export default function SandboxBuilder({
     setBackgroundAsset(null);
     setLocalStatus('');
   }, []);
-
-  const currentStatus = sandboxLoading
-    ? 'Preparing sandbox session…'
-    : sandboxSending
-      ? 'Agent is thinking…'
-      : '';
 
   const sessionId = sandboxSession?.sessionId || '';
   useEffect(() => {
@@ -295,13 +360,15 @@ export default function SandboxBuilder({
   }, [localError, messageApi]);
 
   const knowledgeButtonClass = `${styles.ghostButton} ${styles.snippetsButton}`;
-  const canSaveSandbox = Boolean(onSaveSandbox) && sandboxName.trim() && selectedFloppyId && !savingSandbox;
+  const canSaveSandbox = Boolean(onSaveSandbox) && sandboxName.trim() && selectedFloppyIds.length && !savingSandbox;
+  const canLoadSandbox = hasFloppies && selectedFloppyIds.length && !sandboxLoading;
   const showClearSandboxButton = Boolean(
     currentSandboxId
       || sandboxName.trim()
       || characterPrompt.trim()
       || avatarAsset
-      || backgroundAsset,
+      || backgroundAsset
+      || selectedFloppyIds.length,
   );
 
   return (
@@ -328,36 +395,39 @@ export default function SandboxBuilder({
 
           {hasFloppies ? (
             <div className={styles.formGrid}>
-              <label className={styles.formField}>
+              <label className={`${styles.formField} ${styles.formFieldFull}`}>
                 <span className={styles.label}>Available floppies</span>
                 <select
                   className={styles.select}
-                  value={selectedFloppyId}
-                  onChange={(event) => setSelectedFloppyId(event.target.value)}
+                  value={selectedFloppyIds}
+                  onChange={handleFloppySelectionChange}
                   disabled={sandboxLoading}
+                  multiple
+                  size={floppySelectSize}
                 >
-                  <option value="">Select a floppy…</option>
                   {floppies.map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.title}
                     </option>
                   ))}
                 </select>
-              </label>
-
-              <label className={styles.formField}>
-                <span className={styles.label}>Level</span>
-                <input
-                  className={styles.input}
-                  value={activeFloppy?.level || '—'}
-                  disabled
-                />
+                <span className={styles.hint}>
+                  Hold ⌘ (Mac) or Ctrl (Windows) to select multiple floppies.
+                </span>
+                {selectedFloppySummary ? (
+                  <span className={styles.hint}>Selected: {selectedFloppySummary}</span>
+                ) : null}
               </label>
 
               <div className={`${styles.formField} ${styles.formFieldFull}`}>
                 <span className={styles.label}>Description</span>
                 <div className={styles.readonlyBox}>
-                  {activeFloppy?.description || 'Select a floppy to read its description.'}
+                  {activeFloppies.length
+                    ? activeFloppies.map((floppy) => {
+                      const description = floppy.description || 'No description provided yet.';
+                      return `${floppy.title || 'Untitled floppy'} — ${description}`;
+                    }).join('\n\n')
+                    : 'Select one or more floppies to read their descriptions.'}
                 </div>
               </div>
 
@@ -376,7 +446,7 @@ export default function SandboxBuilder({
                   </div>
                 ) : (
                   <div className={styles.readonlyBox}>
-                    No knowledge snippets were provided for this floppy yet.
+                    No knowledge snippets were provided for the selected floppies yet.
                   </div>
                 )}
               </div>
@@ -387,25 +457,10 @@ export default function SandboxBuilder({
             </div>
           )}
 
-          {(sandboxError || localError) ? (
-            <div className={styles.statusError}>{sandboxError || localError}</div>
+          {localError ? (
+            <div className={styles.statusError}>{localError}</div>
           ) : null}
 
-          <div className={styles.actions}>
-            <button
-              type="button"
-              className={styles.primaryButton}
-              onClick={handleStart}
-              disabled={!hasFloppies || sandboxLoading}
-            >
-              {sandboxLoading ? 'Loading sandbox…' : 'Load into sandbox'}
-            </button>
-            {sandboxSession?.sessionId ? (
-              <span className={styles.statusSuccess}>
-                Sandbox ready — session {sandboxSession.sessionId.slice(0, 8)}…
-              </span>
-            ) : null}
-          </div>
         </section>
 
         <section className={styles.card}>
@@ -528,6 +583,16 @@ export default function SandboxBuilder({
               <SaveOutlined aria-hidden="true" />
               <span>{savingSandbox ? 'Saving…' : currentSandboxId ? 'Update sandbox' : 'Save sandbox'}</span>
             </button>
+            <button
+              type="button"
+              className={styles.loadSandboxButton}
+              onClick={handleStart}
+              disabled={!canLoadSandbox}
+              title={selectedFloppyIds.length ? 'Load the selected floppies into the sandbox' : 'Select at least one floppy to enable loading'}
+            >
+              {sandboxLoading ? <LoadingOutlined aria-hidden="true" spin /> : <PlayCircleOutlined aria-hidden="true" />}
+              <span>{sandboxLoading ? 'Loading…' : 'Load into sandbox'}</span>
+            </button>
             {showClearSandboxButton ? (
               <button
                 type="button"
@@ -538,57 +603,15 @@ export default function SandboxBuilder({
                 Clear selection
               </button>
             ) : null}
+            {sandboxSession?.sessionId ? (
+              <span className={styles.statusSuccess}>
+                Sandbox ready — session {sandboxSession.sessionId.slice(0, 8)}…
+              </span>
+            ) : null}
             {localStatus ? (
               <span className={styles.statusSuccess} role="status">{localStatus}</span>
             ) : null}
           </div>
-        </section>
-
-        <section className={styles.card}>
-          <div className={styles.cardHeader}>
-            <div>
-              <h2 className={styles.cardTitle}>Sandbox conversation</h2>
-              <p className={styles.cardSubtitle}>
-                Ask questions and validate responses against the floppy knowledge. Reset by loading a new sandbox session.
-              </p>
-            </div>
-            {currentStatus ? <span className={styles.loader}>{currentStatus}</span> : null}
-          </div>
-
-          {sandboxSession?.sessionId ? (
-            <>
-              <div className={styles.chatWindow}>
-                {sandboxHistory.length ? (
-                  <div className={styles.chatHistory}>
-                    {sandboxHistory.map((entry, index) => (
-                      <MessageBubble key={`${entry.role}-${index}-${entry.content.slice(0, 12)}`} entry={entry} />
-                    ))}
-                  </div>
-                ) : (
-                  <div className={styles.emptyState}>
-                    Start the conversation by asking the agent a question about this floppy.
-                  </div>
-                )}
-              </div>
-              <form className={styles.chatInputRow} onSubmit={handleSend}>
-                <input
-                  className={styles.chatInput}
-                  type="text"
-                  value={inputMessage}
-                  onChange={(event) => setInputMessage(event.target.value)}
-                  placeholder="Ask the agent to explain or verify something…"
-                  disabled={sandboxSending}
-                />
-                <button type="submit" className={styles.primaryButton} disabled={sandboxSending}>
-                  {sandboxSending ? 'Sending…' : 'Send'}
-                </button>
-              </form>
-            </>
-          ) : (
-            <div className={styles.emptyState}>
-              Load a floppy into the sandbox to open an interactive chat.
-            </div>
-          )}
         </section>
 
         {isKnowledgeModalOpen ? (
@@ -604,7 +627,7 @@ export default function SandboxBuilder({
                   <h2 className={styles.modalTitle}>Knowledge snippets</h2>
                   <p className={styles.modalSubtitle}>
                     {`Showing ${knowledgeSnippetCount} snippet${knowledgeSnippetCount === 1 ? '' : 's'}`}
-                    {activeFloppy?.title ? ` for “${activeFloppy.title}”.` : '.'}
+                    {knowledgeModalSubject}
                   </p>
                 </div>
                 <button
@@ -619,9 +642,12 @@ export default function SandboxBuilder({
               <div className={styles.modalBody}>
                 <div className={styles.snippetModalList}>
                   <ul className={styles.knowledgeList}>
-                    {knowledgeSnippetItems.map(({ key, text }) => (
+                    {knowledgeSnippetItems.map(({ key, text, floppyTitle }) => (
                       <li key={key}>
-                        <span className={styles.snippetText}>{text}</span>
+                        <span className={styles.snippetText}>
+                          {activeFloppies.length > 1 ? `${floppyTitle}: ` : ''}
+                          {text}
+                        </span>
                       </li>
                     ))}
                   </ul>
@@ -632,5 +658,92 @@ export default function SandboxBuilder({
         ) : null}
       </div>
     </>
+  );
+}
+
+export function SandboxConversation({
+  sandboxSession,
+  sandboxHistory = [],
+  sandboxLoading = false,
+  sandboxSending = false,
+  sandboxError = '',
+  onSendMessage,
+}) {
+  const [inputMessage, setInputMessage] = useState('');
+  const [localError, setLocalError] = useState('');
+
+  const currentStatus = sandboxLoading
+    ? 'Preparing sandbox session…'
+    : sandboxSending
+      ? 'Agent is thinking…'
+      : '';
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setLocalError('');
+    const trimmed = inputMessage.trim();
+    if (!trimmed) {
+      setLocalError('Enter a message to send to the sandbox agent.');
+      return;
+    }
+    try {
+      await onSendMessage?.(trimmed);
+      setInputMessage('');
+    } catch (err) {
+      setLocalError(err?.message || 'The sandbox agent could not process your message.');
+    }
+  };
+
+  const statusMessage = sandboxError || localError;
+
+  return (
+    <section className={`${styles.card} ${styles.conversationCard}`}>
+      <div className={styles.cardHeader}>
+        <div>
+          <h2 className={styles.cardTitle}>Sandbox conversation</h2>
+          <p className={styles.cardSubtitle}>
+            Ask questions and validate responses against the floppy knowledge. Reset by loading a new sandbox session.
+          </p>
+        </div>
+        {currentStatus ? <span className={styles.loader}>{currentStatus}</span> : null}
+      </div>
+
+      {statusMessage ? <div className={styles.statusError}>{statusMessage}</div> : null}
+
+      {sandboxSession?.sessionId ? (
+        <>
+          <div className={styles.chatWindow}>
+            {sandboxHistory.length ? (
+              <div className={styles.chatHistory}>
+                {sandboxHistory.map((entry, index) => (
+                  <MessageBubble key={`${entry.role}-${index}-${entry.content.slice(0, 12)}`} entry={entry} />
+                ))}
+              </div>
+            ) : (
+              <div className={styles.emptyState}>
+                Start the conversation by asking the agent a question about the loaded floppies.
+              </div>
+            )}
+          </div>
+          <form className={styles.chatInputRow} onSubmit={handleSubmit}>
+            <input
+              className={styles.chatInput}
+              type="text"
+              value={inputMessage}
+              onChange={(event) => setInputMessage(event.target.value)}
+              placeholder="Ask the agent to explain or verify something…"
+              disabled={sandboxSending}
+            />
+            <button type="submit" className={styles.primaryButton} disabled={sandboxSending}>
+              {sandboxSending ? 'Sending…' : 'Send'}
+            </button>
+          </form>
+        </>
+      ) : (
+        <div className={styles.emptyState}>
+          Load at least one floppy into the sandbox to open an interactive chat.
+        </div>
+      )}
+    </section>
   );
 }

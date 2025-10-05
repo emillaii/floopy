@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import AdminLogin from './AdminLogin';
 import AdminShell, { NAV_ITEMS } from './AdminShell';
 import FloppyBuilder from './FloppyBuilder';
-import SandboxBuilder from './SandboxBuilder';
+import SandboxBuilder, { SandboxConversation } from './SandboxBuilder';
 import SandboxManager from './SandboxManager';
 import styles from './admin.module.css';
 import {
@@ -408,15 +408,25 @@ export default function AdminPortal() {
     const payloadInput = typeof options === 'object' && options !== null
       ? options
       : { floppyId: options };
-    const resolvedFloppyId = String(payloadInput?.floppyId || '').trim();
-    if (!resolvedFloppyId) {
-      throw new Error('Select a floppy to load into the sandbox.');
+    const incomingFloppyIds = Array.isArray(payloadInput?.floppyIds)
+      ? payloadInput.floppyIds.map((value) => String(value || '').trim()).filter(Boolean)
+      : [];
+    const singleFloppyId = String(payloadInput?.floppyId || '').trim();
+    const resolvedFloppyIds = Array.from(new Set([
+      ...incomingFloppyIds,
+      ...(singleFloppyId ? [singleFloppyId] : []),
+    ]));
+    if (!resolvedFloppyIds.length) {
+      throw new Error('Select at least one floppy to load into the sandbox.');
     }
     setSandboxLoading(true);
     setSandboxError('');
     setSandboxHistory([]);
     try {
-      const requestBody = { floppyId: resolvedFloppyId };
+      const requestBody = { floppyIds: resolvedFloppyIds };
+      if (resolvedFloppyIds.length === 1) {
+        requestBody.floppyId = resolvedFloppyIds[0];
+      }
       if (payloadInput?.sandboxId) {
         requestBody.sandboxId = payloadInput.sandboxId;
       }
@@ -424,10 +434,17 @@ export default function AdminPortal() {
         requestBody.personaPrompt = payloadInput.personaPrompt;
       }
       const response = await startSandboxSession(session.token, requestBody);
+      const responseFloppies = Array.isArray(response?.floppies)
+        ? response.floppies
+        : response?.floppy
+          ? [response.floppy]
+          : [];
       setSandboxSession({
         sessionId: response?.sessionId,
         persona: response?.persona,
         floppy: response?.floppy,
+        floppies: responseFloppies,
+        floppyIds: responseFloppies.map((item) => item.id).filter(Boolean),
         sandbox: response?.sandbox || null,
       });
       return response;
@@ -510,12 +527,10 @@ export default function AdminPortal() {
               loadingFloppies={floppyLoading}
               onRefresh={() => loadFloppiesWithToken(session.token)}
               sandboxSession={sandboxSession}
-              sandboxHistory={sandboxHistory}
               sandboxLoading={sandboxLoading}
               sandboxSending={sandboxSending}
               sandboxError={sandboxError}
               onStartSandbox={handleStartSandbox}
-              onSendMessage={handleSendSandboxMessage}
               onSaveSandbox={handleSaveSandbox}
               savingSandbox={savingSandbox}
               activeSandbox={activeSandbox}
@@ -536,6 +551,16 @@ export default function AdminPortal() {
               floppies={floppies}
             />
           </aside>
+          <div className={styles.sandboxStudioConversation}>
+            <SandboxConversation
+              sandboxSession={sandboxSession}
+              sandboxHistory={sandboxHistory}
+              sandboxLoading={sandboxLoading}
+              sandboxSending={sandboxSending}
+              sandboxError={sandboxError}
+              onSendMessage={handleSendSandboxMessage}
+            />
+          </div>
         </div>
       ) : null}
     </AdminShell>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import {
   DeleteOutlined,
   EditOutlined,
@@ -41,6 +41,31 @@ export default function SandboxManager({
     });
     return map;
   }, [floppies]);
+
+  const describeSandboxFloppies = useCallback((sandbox) => {
+    if (!sandbox) {
+      return { titles: [], label: 'No linked floppies' };
+    }
+    const metadataFloppyIds = Array.isArray(sandbox.metadata?.floppyIds)
+      ? sandbox.metadata.floppyIds
+      : Array.isArray(sandbox.metadata?.selectedFloppyIds)
+        ? sandbox.metadata.selectedFloppyIds
+        : [];
+    const normalisedMetadataIds = metadataFloppyIds
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+    const fallbackIds = sandbox.floppyId ? [String(sandbox.floppyId).trim()] : [];
+    const resolvedIds = Array.from(new Set([...normalisedMetadataIds, ...fallbackIds].filter(Boolean)));
+    if (!resolvedIds.length) {
+      return { titles: [], label: 'No linked floppies' };
+    }
+    const titles = resolvedIds.map((id) => {
+      const floppy = floppyLookup.get(id);
+      return floppy ? floppy.title : `Unknown floppy (${id})`;
+    }).filter(Boolean);
+    const prefix = titles.length > 1 ? 'Linked floppies' : 'Linked floppy';
+    return { titles, label: `${prefix}: ${titles.join(', ')}` };
+  }, [floppyLookup]);
 
   const handleRefresh = () => {
     const result = onRefresh?.();
@@ -120,7 +145,7 @@ export default function SandboxManager({
         ) : sandboxes.length ? (
           <ul className={styles.sandboxList}>
             {sandboxes.map((sandbox) => {
-              const linkedFloppy = sandbox?.floppyId ? floppyLookup.get(sandbox.floppyId) : null;
+              const { label: linkedFloppyLabel } = describeSandboxFloppies(sandbox);
               const isActive = activeSandboxId === sandbox.id;
               const avatar = sandbox?.characterCard?.avatar?.dataUrl || '';
               const background = sandbox?.characterCard?.background?.dataUrl || '';
@@ -143,9 +168,7 @@ export default function SandboxManager({
                     </div>
                     <div className={styles.sandboxCardBody}>
                       <strong className={styles.sandboxCardTitle}>{sandbox.title || 'Untitled sandbox'}</strong>
-                      <span className={styles.sandboxCardMeta}>
-                        {linkedFloppy ? `Linked floppy: ${linkedFloppy.title}` : 'No linked floppy'}
-                      </span>
+                      <span className={styles.sandboxCardMeta}>{linkedFloppyLabel}</span>
                       <span className={styles.sandboxCardMeta}>Updated {formatTimestamp(sandbox.updatedAt)}</span>
                     </div>
                   </div>

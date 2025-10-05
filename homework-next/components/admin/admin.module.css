@@ -236,30 +236,54 @@
 .sandboxStudio {
   display: grid;
   grid-template-columns: minmax(0, 1.75fr) minmax(280px, 0.85fr);
+  grid-template-areas:
+    'primary aside'
+    'conversation conversation';
   gap: clamp(1.75rem, 4vw, 3rem);
   align-items: flex-start;
   width: 100%;
 }
 
-.sandboxStudioPrimary,
+.sandboxStudioPrimary {
+  grid-area: primary;
+}
+
 .sandboxStudioAside {
+  grid-area: aside;
+}
+
+.sandboxStudioConversation {
+  grid-area: conversation;
+}
+
+.sandboxStudioPrimary,
+.sandboxStudioAside,
+.sandboxStudioConversation {
   display: flex;
   flex-direction: column;
   gap: clamp(1.5rem, 4vw, 2.5rem);
   min-width: 0;
+  min-height: 0;
 }
 
 .sandboxStudioAside > * {
   width: 100%;
 }
 
+.conversationCard {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 2vw, 1.5rem);
+  flex: 1;
+}
+
 @media (max-width: 1280px) {
   .sandboxStudio {
     grid-template-columns: 1fr;
-  }
-
-  .sandboxStudioAside {
-    order: -1;
+    grid-template-areas:
+      'primary'
+      'conversation'
+      'aside';
   }
 }
 
@@ -972,6 +996,35 @@
   cursor: not-allowed;
 }
 
+.loadSandboxButton {
+  border: 2px solid rgba(74, 103, 249, 0.28);
+  border-radius: 14px;
+  padding: 12px 18px;
+  background: rgba(74, 103, 249, 0.08);
+  color: #23336f;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.loadSandboxButton:hover {
+  background: rgba(74, 103, 249, 0.16);
+  border-color: rgba(74, 103, 249, 0.48);
+  transform: translateY(-1px);
+}
+
+.loadSandboxButton:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .ghostButton {
   border: none;
   border-radius: 14px;
@@ -1367,6 +1420,36 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 18px;
+}
+
+.formFooter {
+  margin-top: clamp(1.25rem, 3vw, 1.75rem);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+}
+
+.saveButton {
+  padding: 12px 24px;
+  min-width: 160px;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.saveButton span {
+  display: inline-flex;
+  align-items: center;
+}
+
+.formFooterNotice {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--fun-highlight-dark);
+  background: rgba(255, 107, 214, 0.12);
+  border-radius: 999px;
+  padding: 6px 12px;
 }
 
 .groupList {
@@ -2214,8 +2297,9 @@
   border-radius: 18px;
   padding: 18px;
   background: linear-gradient(135deg, #ffffff 0%, #f7f8ff 100%);
-  min-height: 240px;
-  max-height: 380px;
+  min-height: 420px;
+  max-height: none;
+  flex: 1;
   overflow-y: auto;
 }
 
@@ -2263,6 +2347,10 @@
   display: flex;
   gap: 12px;
   align-items: center;
+}
+
+.conversationCard .chatInputRow {
+  margin-top: auto;
 }
 
 .chatInput {

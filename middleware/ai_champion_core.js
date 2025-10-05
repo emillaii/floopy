@@ -16,6 +16,8 @@ const { loadEnv } = require('./utils/env');
 
 loadEnv();
 
+const KNOWLEDGE_CONFIDENCE_THRESHOLD = 0.6;
+
 // ----- Shared helpers -----
 function ensureHttpPrefix(endpoint) {
   if (!endpoint) return endpoint;
@@ -269,14 +271,27 @@ function buildMemorySnippet(items) {
       const keywords = extractMemoryKeywords(metadata, 5);
 
       const headerSegments = [];
-      headerSegments.push(`${(f.role || 'unknown').toUpperCase()}${when ? ` (${when})` : ''}`);
-      if (sourceLabel) headerSegments.push(`Source: ${sourceLabel}`);
+      if (sourceLabel) headerSegments.push(sourceLabel);
+      if (when) headerSegments.push(`Retrieved: ${when}`);
+      headerSegments.push(`${(f.role || 'unknown').toUpperCase()}`);
       if (url) headerSegments.push(`URL: ${url}`);
       if (keywords.length) headerSegments.push(`Keywords: ${keywords.join(', ')}`);
 
       return `${headerSegments.join(' | ')}\n${f.content}`;
     })
     .join('\n---\n');
+}
+
+function resolveMemoryScore(memory) {
+  if (!memory) return 0;
+  const candidates = [memory.Score, memory.score, memory?.Fields?.score];
+  for (const candidate of candidates) {
+    const numeric = Number(candidate);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+  return 0;
 }
 
 async function callLLM(config, messages) {
@@ -470,46 +485,60 @@ class ChampionChatSession {
       console.log(`[Champion][Memory] No external context found for ${this.sessionId}.`);
     }
 
+    const topMemoryScore = memories.reduce((max, item) => {
+      const score = resolveMemoryScore(item);
+      return score > max ? score : max;
+    }, 0);
+    const knowledgeBelowThreshold = memories.length > 0 && topMemoryScore < KNOWLEDGE_CONFIDENCE_THRESHOLD;
+
     const promptHistory = this.history.slice(-this.historyLimit * 2);
     if (promptHistory.length && promptHistory[promptHistory.length - 1]?.role === 'user') {
       promptHistory.pop();
     }
 
-    const messages = buildMessages(
-      config.systemPrompt,
-      this.persona,
-      this.userId,
-      memories,
-      promptHistory,
-      userInput,
-    );
-
-    try {
-      const contextLog = {
-        sessionId: this.sessionId,
-        userId: this.userId,
-        persona: this.persona?.name,
-        messageCount: messages.length,
-        messages,
-        memoryPreview: buildMemorySnippet(memories),
-      };
-      // eslint-disable-next-line no-console
-      console.log(`[Champion][LLM Input] ${this.sessionId}`, JSON.stringify(contextLog, null, 2));
-    } catch (logErr) {
-      // eslint-disable-next-line no-console
-      console.warn('Failed to serialise LLM context for logging:', logErr);
-    }
-
     let assistantReply;
-    try {
-      const llmResponse = await callLLM(config.llm, messages);
-      if (!llmResponse.content) {
-        assistantReply = fallbackResponder(userInput, memories, this.persona);
-      } else {
-        assistantReply = llmResponse.content;
+    if (knowledgeBelowThreshold) {
+      assistantReply = 'Sorry, I don\'t know.';
+      // eslint-disable-next-line no-console
+      console.log(
+        `[Champion][Knowledge] Max context score ${topMemoryScore.toFixed(3)} below threshold; skipping LLM for ${this.sessionId}.`,
+      );
+    } else {
+      const messages = buildMessages(
+        config.systemPrompt,
+        this.persona,
+        this.userId,
+        memories,
+        promptHistory,
+        userInput,
+      );
+
+      try {
+        const contextLog = {
+          sessionId: this.sessionId,
+          userId: this.userId,
+          persona: this.persona?.name,
+          messageCount: messages.length,
+          messages,
+          memoryPreview: buildMemorySnippet(memories),
+        };
+        // eslint-disable-next-line no-console
+        console.log(`[Champion][LLM Input] ${this.sessionId}`, JSON.stringify(contextLog, null, 2));
+      } catch (logErr) {
+        // eslint-disable-next-line no-console
+        console.warn('Failed to serialise LLM context for logging:', logErr);
       }
-    } catch (err) {
-      assistantReply = fallbackResponder(userInput, memories, this.persona);
+
+      try {
+        const llmResponse = await callLLM(config.llm, messages);
+        if (!llmResponse.content) {
+          assistantReply = fallbackResponder(userInput, memories, this.persona);
+        } else {
+          assistantReply = llmResponse.content;
+        }
+      } catch (err) {
+        assistantReply = fallbackResponder(userInput, memories, this.persona);
+      }
     }
 
     const assistantDocId = `${this.sessionId}-assistant-${Date.now()}`;
@@ -555,7 +584,7 @@ class ChampionChatManager {
       VIKINGDB_EMB_DIM = '1024',
       CHAT_TOP_K = '6',
       CHAT_HISTORY_LIMIT = '8',
-      CHAT_SYSTEM_PROMPT = 'You are the AI Champion assistant. Use provided memory to answer succinctly and helpfully. If memory is empty, rely on your general reasoning.',
+      CHAT_SYSTEM_PROMPT = 'You are the AI Champion assistant. Use provided memory to answer succinctly and helpfully. Cite supporting snippets using their source name or URL in square brackets so the user can follow up. If memory is empty, rely on your general reasoning.',
       CHAT_USERS,
       CHAT_DEFAULT_USER,
       CHAT_PERSONAS,

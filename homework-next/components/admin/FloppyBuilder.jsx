@@ -1,13 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { message } from 'antd';
+import { message, Modal } from 'antd';
 import {
   CheckOutlined,
   CloseCircleOutlined,
   CloseOutlined,
   DeleteOutlined,
   EditOutlined,
+  ExclamationCircleOutlined,
   FolderOpenOutlined,
   FormOutlined,
   LoadingOutlined,
@@ -18,6 +19,29 @@ import {
   UploadOutlined,
 } from '@ant-design/icons';
 import styles from './admin.module.css';
+
+function normaliseKnowledgeGroupsSnapshot(groups = []) {
+  return [...groups]
+    .map((group) => ({
+      id: group?.id || '',
+      name: (group?.name || '').trim(),
+      description: (group?.description || '').trim(),
+    }))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
+function createFormSnapshot({ title = '', description = '', knowledge = '', knowledgeGroups = [] }) {
+  return {
+    title: (title || '').trim(),
+    description: (description || '').trim(),
+    knowledge: knowledge || '',
+    groups: normaliseKnowledgeGroupsSnapshot(knowledgeGroups),
+  };
+}
+
+function snapshotKeyFromValues(values) {
+  return JSON.stringify(createFormSnapshot(values));
+}
 
 function formatDate(value) {
   if (!value) return '—';
@@ -81,11 +105,37 @@ export default function FloppyBuilder({
 
   const isEditing = modalMode === 'edit' && Boolean(editingId);
 
+  const baselineSnapshotRef = useRef(snapshotKeyFromValues({
+    title: '',
+    description: '',
+    knowledge: '',
+    knowledgeGroups: [],
+  }));
+
+  const setBaselineSnapshot = useCallback((values) => {
+    baselineSnapshotRef.current = snapshotKeyFromValues(values);
+  }, []);
+
+  const currentSnapshotKey = useMemo(
+    () => snapshotKeyFromValues({
+      title,
+      description,
+      knowledge,
+      knowledgeGroups,
+    }),
+    [title, description, knowledge, knowledgeGroups],
+  );
+
+  const hasUnsavedChanges = useMemo(
+    () => currentSnapshotKey !== baselineSnapshotRef.current,
+    [currentSnapshotKey],
+  );
+
   const syncGroupsFromServer = useCallback((incomingGroups) => {
     if (!Array.isArray(incomingGroups)) {
       setKnowledgeGroups([]);
       setUploadGroupId('');
-      return;
+      return [];
     }
     const sanitisedIncoming = incomingGroups.map((group) => ({
       id: group?.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `group-${Date.now()}`),
@@ -128,13 +178,16 @@ export default function FloppyBuilder({
       }
       return current;
     });
+
+    return mergedResult;
   }, []);
 
-  const resetFormState = () => {
+  const resetFormState = useCallback(() => {
     setTitle('');
     setDescription('');
     setKnowledge('');
     setInitialKnowledgeBaseline('');
+    setStatus('');
     setFormError('');
     setUploadStatus('');
     setUploadOutcomes([]);
@@ -144,22 +197,84 @@ export default function FloppyBuilder({
     setDeleteConfirm({ type: null, floppy: null, file: null });
     setKnowledgeGroups([]);
     setUploadGroupId('');
-  };
+    setBaselineSnapshot({
+      title: '',
+      description: '',
+      knowledge: '',
+      knowledgeGroups: [],
+    });
+  }, [setBaselineSnapshot]);
 
-  const openCreateModal = () => {
+  const confirmUnsavedChanges = useCallback(
+    ({
+      title: confirmTitle = 'Discard unsaved changes?',
+      content: confirmContent = 'You have unsaved changes. Continue without saving?',
+      okText: confirmOkText = 'Discard changes',
+      cancelText: confirmCancelText = 'Keep editing',
+    } = {}) =>
+      new Promise((resolve) => {
+        let settled = false;
+        const settle = (value) => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        Modal.confirm({
+          title: confirmTitle,
+          content: confirmContent,
+          icon: <ExclamationCircleOutlined style={{ color: '#faad14' }} />,
+          okText: confirmOkText,
+          cancelText: confirmCancelText,
+          okType: 'danger',
+          centered: true,
+          maskClosable: true,
+          closable: true,
+          onOk: () => settle(true),
+          onCancel: () => settle(false),
+          afterClose: () => settle(false),
+        });
+      }),
+    [],
+  );
+
+  const openCreateModal = useCallback(async () => {
+    if (isModalOpen && hasUnsavedChanges) {
+      const confirmed = await confirmUnsavedChanges({
+        content: 'Start a new floppy without saving your changes?',
+        okText: 'Discard and create new',
+      });
+      if (!confirmed) {
+        return;
+      }
+    }
     resetFormState();
     setModalMode('create');
     setEditingId('');
     setIsModalOpen(true);
-  };
+  }, [confirmUnsavedChanges, hasUnsavedChanges, isModalOpen, resetFormState]);
 
-  const handleCloseModal = () => {
+  const closeModal = useCallback(() => {
     setIsModalOpen(false);
     setModalMode('create');
     setEditingId('');
     setDeleteConfirm({ type: null, floppy: null, file: null });
     resetFormState();
-  };
+  }, [resetFormState]);
+
+  const handleRequestCloseModal = useCallback(
+    async ({ force = false } = {}) => {
+      if (!force && hasUnsavedChanges) {
+        const confirmed = await confirmUnsavedChanges({
+          content: 'Close without saving your changes?',
+        });
+        if (!confirmed) {
+          return;
+        }
+      }
+      closeModal();
+    },
+    [closeModal, confirmUnsavedChanges, hasUnsavedChanges],
+  );
   const totalFloppies = useMemo(() => floppies.length, [floppies]);
   const floppyMetrics = useMemo(() => {
     if (!floppies.length) {
@@ -267,27 +382,46 @@ export default function FloppyBuilder({
       return;
     }
 
+    const trimmedDescription = description.trim();
+    const normalisedGroups = knowledgeGroups.map((group) => ({
+      id: group.id,
+      name: group.name?.trim() || 'Untitled context',
+      description: group.description?.trim() || '',
+    }));
+
     const payload = {
       title: trimmedTitle,
-      description: description.trim(),
-      knowledge: knowledge.trim(),
-      knowledgeGroups: knowledgeGroups.map((group) => ({
-        id: group.id,
-        name: group.name?.trim() || 'Untitled context',
-        description: group.description?.trim() || '',
-      })),
+      description: trimmedDescription,
+      knowledge,
+      knowledgeGroups: normalisedGroups,
     };
 
     setSaving(true);
     try {
       if (isEditing) {
         const updated = await onUpdate?.(editingId, payload);
-        if (updated?.id) {
-          setTitle(updated.title || '');
-          setDescription(updated.description || '');
-          setKnowledge(updated.knowledge || '');
-          setInitialKnowledgeBaseline(updated.knowledge || '');
-        }
+        const nextTitle = updated?.title || payload.title;
+        const nextDescription = updated?.description || payload.description;
+        const nextKnowledge = updated?.knowledge ?? knowledge;
+        const nextGroups = Array.isArray(updated?.knowledgeGroups) && updated.knowledgeGroups.length
+          ? updated.knowledgeGroups.map((group) => ({
+              id: group?.id || '',
+              name: (group?.name || '').trim() || 'Untitled context',
+              description: (group?.description || '').trim() || '',
+            }))
+          : normalisedGroups;
+
+        setTitle(nextTitle);
+        setDescription(nextDescription);
+        setKnowledge(nextKnowledge);
+        setInitialKnowledgeBaseline(nextKnowledge || '');
+        setKnowledgeGroups(nextGroups);
+        setBaselineSnapshot({
+          title: nextTitle,
+          description: nextDescription,
+          knowledge: nextKnowledge,
+          knowledgeGroups: nextGroups,
+        });
         setStatus('Floppy details saved.');
       } else {
         await onCreate?.(payload);
@@ -304,22 +438,47 @@ export default function FloppyBuilder({
     }
   };
 
-  const handleEditClick = (floppy) => {
+  const handleEditClick = useCallback(async (floppy) => {
     if (!floppy) return;
+    if (isModalOpen && hasUnsavedChanges && editingId !== floppy.id) {
+      const confirmed = await confirmUnsavedChanges({
+        content: `Switch floppies without saving your changes?`,
+      });
+      if (!confirmed) {
+        return;
+      }
+    }
     resetFormState();
     setModalMode('edit');
     setEditingId(floppy.id);
-    setTitle(floppy.title || '');
-    setDescription(floppy.description || '');
-    setKnowledge(floppy.knowledge || '');
-    setInitialKnowledgeBaseline(floppy.knowledge || '');
+    const nextTitle = floppy.title || '';
+    const nextDescription = floppy.description || '';
+    const nextKnowledge = floppy.knowledge || '';
+    setTitle(nextTitle);
+    setDescription(nextDescription);
+    setKnowledge(nextKnowledge);
+    setInitialKnowledgeBaseline(nextKnowledge);
     setFormError('');
     setUploadStatus('');
     setUploadOutcomes([]);
     const incomingGroups = Array.isArray(floppy.knowledgeGroups) ? floppy.knowledgeGroups : [];
-    syncGroupsFromServer(incomingGroups);
+    const syncedGroups = syncGroupsFromServer(incomingGroups);
+    setBaselineSnapshot({
+      title: nextTitle,
+      description: nextDescription,
+      knowledge: nextKnowledge,
+      knowledgeGroups: syncedGroups,
+    });
     setIsModalOpen(true);
-  };
+  }, [
+    confirmUnsavedChanges,
+    editingId,
+    hasUnsavedChanges,
+    isModalOpen,
+    resetFormState,
+    setBaselineSnapshot,
+    syncGroupsFromServer,
+  ]);
 
   const handleDeleteClick = (floppy) => {
     if (!floppy?.id || !onDelete) return;
@@ -351,7 +510,7 @@ export default function FloppyBuilder({
       try {
         await onDelete(targetFloppyId);
         if (editingId === targetFloppyId) {
-          handleCloseModal();
+          closeModal();
         }
         setStatus('Floppy deleted successfully.');
       } catch (err) {
@@ -374,13 +533,25 @@ export default function FloppyBuilder({
         const result = await onDeleteKnowledgeFile({ floppyId: targetFloppyId, fileId });
         setUploadOutcomes([]);
         setUploadStatus('Document removed from floppy.');
+        const wasPristineBeforeDelete = !hasUnsavedChanges;
         if (result?.floppy?.id === editingId) {
           const incomingGroups = Array.isArray(result.floppy.knowledgeGroups) ? result.floppy.knowledgeGroups : [];
-          syncGroupsFromServer(incomingGroups);
-          setDescription(result.floppy.description || description);
+          const syncedGroups = syncGroupsFromServer(incomingGroups);
+          const serverDescription = result.floppy.description || description;
+          const serverKnowledge = result.floppy.knowledge || '';
+          setDescription(serverDescription);
+          const nextKnowledgeValue = knowledge === initialKnowledgeBaseline ? serverKnowledge : knowledge;
           if (knowledge === initialKnowledgeBaseline) {
-            setKnowledge(result.floppy.knowledge || knowledge);
-            setInitialKnowledgeBaseline(result.floppy.knowledge || knowledge);
+            setKnowledge(serverKnowledge);
+            setInitialKnowledgeBaseline(serverKnowledge);
+          }
+          if (wasPristineBeforeDelete) {
+            setBaselineSnapshot({
+              title,
+              description: serverDescription,
+              knowledge: nextKnowledgeValue,
+              knowledgeGroups: syncedGroups,
+            });
           }
         }
       } catch (err) {
@@ -444,6 +615,7 @@ export default function FloppyBuilder({
 
     setUploadStatus('');
     setUploadOutcomes([]);
+    const wasPristineBeforeUpload = !hasUnsavedChanges;
 
     try {
       const selectedGroup = knowledgeGroups.find((group) => group.id === uploadGroupId);
@@ -471,11 +643,22 @@ export default function FloppyBuilder({
       }
       if (result?.floppy?.id === editingId) {
         const incomingGroups = Array.isArray(result.floppy.knowledgeGroups) ? result.floppy.knowledgeGroups : [];
-        syncGroupsFromServer(incomingGroups);
-        setDescription(result.floppy.description || description);
+        const syncedGroups = syncGroupsFromServer(incomingGroups);
+        const serverDescription = result.floppy.description || description;
+        const serverKnowledge = result.floppy.knowledge || '';
+        setDescription(serverDescription);
+        const nextKnowledgeValue = knowledge === initialKnowledgeBaseline ? serverKnowledge : knowledge;
         if (knowledge === initialKnowledgeBaseline) {
-          setKnowledge(result.floppy.knowledge || knowledge);
-          setInitialKnowledgeBaseline(result.floppy.knowledge || knowledge);
+          setKnowledge(serverKnowledge);
+          setInitialKnowledgeBaseline(serverKnowledge);
+        }
+        if (wasPristineBeforeUpload) {
+          setBaselineSnapshot({
+            title,
+            description: serverDescription,
+            knowledge: nextKnowledgeValue,
+            knowledgeGroups: syncedGroups,
+          });
         }
       }
     } catch (err) {
@@ -528,13 +711,13 @@ export default function FloppyBuilder({
     ? (saving ? 'Saving…' : 'Save changes')
     : (creating || saving)
       ? 'Saving…'
-      : 'OK';
+      : 'Create floppy';
   const submitDisabled = creating || saving;
   const submitIcon = saving
     ? <LoadingOutlined aria-hidden="true" spin />
     : modalMode === 'edit'
       ? <SaveOutlined aria-hidden="true" />
-      : <CheckOutlined aria-hidden="true" />;
+      : <PlusCircleOutlined aria-hidden="true" />;
   const formId = modalMode === 'edit' ? 'floppy-edit-form' : 'floppy-create-form';
   const isDeleteDialogOpen = Boolean(deleteConfirm.type);
   const deleteDialogBusy = deleteConfirm.type === 'floppy'
@@ -798,7 +981,7 @@ export default function FloppyBuilder({
                 <button
                   type="button"
                   className={styles.modalCloseButton}
-                  onClick={handleCloseModal}
+                  onClick={() => handleRequestCloseModal()}
                   aria-label="Close builder"
                   title="Close builder"
                 >
@@ -859,20 +1042,6 @@ export default function FloppyBuilder({
                         />
                         <span className={styles.inputHint}>Keep it short and high-level – detailed instructions live in knowledge contexts.</span>
                       </label>
-                    </div>
-                    <div className={styles.formSectionActions}>
-                      <button
-                        type="submit"
-                        className={styles.primaryButton}
-                        disabled={submitDisabled}
-                        aria-label={submitLabel}
-                        title={submitLabel}
-                      >
-                        {submitIcon || <CheckOutlined aria-hidden="true" />}
-                      </button>
-                      {isModalOpen && modalMode === 'edit' && status ? (
-                        <span className={styles.statusSuccess} role="status">{status}</span>
-                      ) : null}
                     </div>
                   </div>
 
@@ -1097,8 +1266,24 @@ export default function FloppyBuilder({
                       </div>
                     </>
                   )}
-
-
+                  <div className={styles.formFooter}>
+                    {isEditing && status ? (
+                      <span className={styles.statusSuccess} role="status">{status}</span>
+                    ) : null}
+                    {hasUnsavedChanges ? (
+                      <span className={styles.formFooterNotice}>Unsaved changes</span>
+                    ) : null}
+                    <button
+                      type="submit"
+                      className={`${styles.primaryButton} ${styles.saveButton}`}
+                      disabled={submitDisabled}
+                      aria-label={submitLabel}
+                      title={submitLabel}
+                    >
+                      {submitIcon || <CheckOutlined aria-hidden="true" />}
+                      <span>{submitLabel}</span>
+                    </button>
+                  </div>
 
                   {formError ? <span className={styles.statusError}>{formError}</span> : null}
                 </form>
